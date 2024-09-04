@@ -14,7 +14,29 @@ SERVICE_ACCOUNT_FILE = 'credentials.json'
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Add these constants for rate limiting
+BASE_DELAY = 1  # Base delay in seconds
+MAX_DELAY = 32  # Maximum delay in seconds
+MAX_RETRIES = 5  # Maximum number of retries
 
+def exponential_backoff(func):
+    def wrapper(*args, **kwargs):
+        delay = BASE_DELAY
+        for attempt in range(MAX_RETRIES):
+            try:
+                return func(*args, **kwargs)
+            except HttpError as error:
+                if error.resp.status in [429, 500, 503]:  # Rate limit error codes
+                    if attempt == MAX_RETRIES - 1:
+                        raise
+                    sleep_time = min(delay * (2 ** attempt), MAX_DELAY)
+                    logging.warning(f"Rate limit hit. Retrying in {sleep_time} seconds...")
+                    time.sleep(sleep_time)
+                else:
+                    raise
+    return wrapper
+
+@exponential_backoff
 def get_service():
     """
     Creates and returns a Google Drive service object using service account credentials.
@@ -27,7 +49,6 @@ def get_service():
         SERVICE_ACCOUNT_FILE, scopes=SCOPES)
     return build('drive', 'v3', credentials=creds)
 
-
 def is_allbirds_email(email):
     """
     Checks if an email belongs to your domain.
@@ -36,7 +57,7 @@ def is_allbirds_email(email):
     """
     return email.lower().endswith('@domain.com') or email.lower().endswith('@ext.domain.com')
 
-
+@exponential_backoff
 def get_shared_files_and_folders(service, limit):
     """
     Retrieves files and folders shared with the service account.
@@ -52,31 +73,27 @@ def get_shared_files_and_folders(service, limit):
     page_token = None
 
     while True:
-        try:
-            results = service.files().list(
-                q=query,
-                fields=fields,
-                pageSize=100,
-                pageToken=page_token
-            ).execute()
+        results = service.files().list(
+            q=query,
+            fields=fields,
+            pageSize=100,
+            pageToken=page_token
+        ).execute()
 
-            items = results.get('files', [])
-            all_items.extend(items)
-            logging.info(f"Found {len(items)} shared items")
+        items = results.get('files', [])
+        all_items.extend(items)
+        logging.info(f"Found {len(items)} shared items")
 
-            if limit and len(all_items) >= limit:
-                return all_items[:limit]
+        if limit and len(all_items) >= limit:
+            return all_items[:limit]
 
-            page_token = results.get('nextPageToken')
-            if not page_token:
-                break
-        except HttpError as error:
-            logging.error(f"An error occurred while fetching shared files: {error}")
+        page_token = results.get('nextPageToken')
+        if not page_token:
             break
 
     return all_items
 
-
+@exponential_backoff
 def get_folder_contents(service, folder_id):
     """
     Retrieves the contents of a specific folder.
@@ -91,23 +108,19 @@ def get_folder_contents(service, folder_id):
     page_token = None
 
     while True:
-        try:
-            results = service.files().list(
-                q=query,
-                fields=fields,
-                pageSize=100,
-                pageToken=page_token
-            ).execute()
+        results = service.files().list(
+            q=query,
+            fields=fields,
+            pageSize=100,
+            pageToken=page_token
+        ).execute()
 
-            items = results.get('files', [])
-            all_items.extend(items)
-            logging.info(f"Found {len(items)} items in folder {folder_id}")
+        items = results.get('files', [])
+        all_items.extend(items)
+        logging.info(f"Found {len(items)} items in folder {folder_id}")
 
-            page_token = results.get('nextPageToken')
-            if not page_token:
-                break
-        except HttpError as error:
-            logging.error(f"An error occurred while fetching folder contents: {error}")
+        page_token = results.get('nextPageToken')
+        if not page_token:
             break
 
     return all_items
@@ -143,6 +156,7 @@ def process_items_recursively(service, items, processed_ids, limit):
     return all_files
 
 
+@exponential_backoff
 def process_file(service, file, revoke_permissions):
     """
     Processes a single file, checking for external permissions and optionally revoking them.
@@ -159,20 +173,17 @@ def process_file(service, file, revoke_permissions):
     permissions_revoked = False
 
     for permission in file.get('permissions', []):
-        try:
-            email = permission.get('emailAddress', '')
-            if permission.get('type') == 'user' and not is_allbirds_email(email):
-                external_emails.append(email)
+        email = permission.get('emailAddress', '')
+        if permission.get('type') == 'user' and not is_allbirds_email(email):
+            external_emails.append(email)
 
-                if revoke_permissions:
-                    service.permissions().delete(fileId=file_id, permissionId=permission['id']).execute()
-                    logging.info(f"Revoked access for file ID: {file_id}, permission ID: {permission['id']}")
-                    permissions_revoked = True
-                else:
-                    logging.info(
-                        f"[DRY RUN] Would revoke access for file ID: {file_id}, permission ID: {permission['id']}")
-        except HttpError as error:
-            logging.error(f"Error processing permission {permission['id']} for file {file_id}: {error}")
+            if revoke_permissions:
+                service.permissions().delete(fileId=file_id, permissionId=permission['id']).execute()
+                logging.info(f"Revoked access for file ID: {file_id}, permission ID: {permission['id']}")
+                permissions_revoked = True
+            else:
+                logging.info(
+                    f"[DRY RUN] Would revoke access for file ID: {file_id}, permission ID: {permission['id']}")
 
     return {
         'name': file_name,
