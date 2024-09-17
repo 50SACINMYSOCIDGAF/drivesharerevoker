@@ -49,7 +49,7 @@ def get_service():
         SERVICE_ACCOUNT_FILE, scopes=SCOPES)
     return build('drive', 'v3', credentials=creds)
 
-def is_allbirds_email(email):
+def is_domain_email(email):
     """
     Checks if an email belongs to your domain.
 
@@ -174,7 +174,7 @@ def process_file(service, file, revoke_permissions):
 
     for permission in file.get('permissions', []):
         email = permission.get('emailAddress', '')
-        if permission.get('type') == 'user' and not is_allbirds_email(email):
+        if permission.get('type') == 'user' and not is_domain_email(email):
             external_emails.append(email)
 
             if revoke_permissions:
